@@ -22,6 +22,7 @@
 #include "fmgr.h"					// needed for PG_MODULE_MAGIC
 #include "storage/latch.h"			// for *Latch()
 #include "utils/wait_event.h"		// for *Latch()
+#include "utils/guc.h"				// for GUC
 
 /* Required in all loadable module */
 PG_MODULE_MAGIC;
@@ -31,6 +32,13 @@ PG_MODULE_MAGIC;
  * external code using "PGDLLEXPORT"
  */
 PGDLLEXPORT void cpg_main(Datum main_arg);
+
+/*
+ * Global variables
+ */
+
+/* Maximum interval between bgworker wakeups */
+static int interval;
 
 /*
  * Functions
@@ -71,6 +79,38 @@ cpg_main(Datum main_arg)
 
 	/* We can now unblock signals */
 	BackgroundWorkerUnblockSignals();
+
+	/*
+	 * GUC declarations
+	 */
+
+	/* interval */
+	DefineCustomIntVariable("cpg.interval",	// name
+							"Defines the maximal interval in seconds between "
+							"wakeups",		// description
+							NULL,			// long description
+							&interval,		// variable to set
+							10,				// default value
+							1,				// min value
+							INT_MAX / 1000,	// max value
+							PGC_SIGHUP,		// context
+							GUC_UNIT_S,		// flags
+							NULL,			// check hook
+							NULL,			// assign hook
+						NULL);				// show hook
+
+	/*
+	 * Lock namespace "cpg". Forbid creating any other GUC after here. Useful
+	 * to remove unknown or mispelled GUCs from this domain.
+	 */
+#if PG_VERSION_NUM >= 150000
+	MarkGUCPrefixReserved("cpg");
+#else
+	/* Note that this still exists in v15+ as a macro calling
+	 * MarkGUCPrefixReserved */
+	EmitWarningsOnPlaceholders("cpg");
+#endif
+
 	elog(LOG, "[cpg] Starting…");
 
 	/* Event loop */
@@ -83,7 +123,7 @@ cpg_main(Datum main_arg)
 		/* Wait for an event or timeout */
 		WaitLatch(MyLatch,
 				  WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-				  10*1000, /* ten seconds converted to milliseconds */
+				  interval*1000, /* convert to milliseconds */
 				  PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 	}
