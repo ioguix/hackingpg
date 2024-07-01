@@ -23,6 +23,8 @@
 #include "storage/latch.h"			// for *Latch()
 #include "utils/wait_event.h"		// for *Latch()
 #include "utils/guc.h"				// for GUC
+#include "utils/ps_status.h"		// rename process
+#include "access/xlog.h"			// for RecoveryInProgress()
 
 /* Required in all loadable module */
 PG_MODULE_MAGIC;
@@ -39,10 +41,28 @@ PGDLLEXPORT void cpg_main(Datum main_arg);
 
 /* Maximum interval between bgworker wakeups */
 static int interval;
+/* Remember recovery state */
+static bool in_recovery;
 
 /*
  * Functions
  */
+
+/*
+ * Update processus title
+ */
+static void
+update_ps_display()
+{
+	char ps_display[128];
+
+	if (in_recovery)
+		snprintf(ps_display, 128, "Hello!");
+	else
+		snprintf(ps_display, 128, "Hello! ⭐");
+
+	set_ps_display(ps_display);
+}
 
 /*
  * Signal handler for SIGTERM
@@ -113,12 +133,24 @@ cpg_main(Datum main_arg)
 
 	elog(LOG, "[cpg] Starting…");
 
+	/* Set initial status and proc title (in this order) */
+	in_recovery = RecoveryInProgress();
+
+	update_ps_display();
+
 	/* Event loop */
 	for (;;)
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		elog(LOG, "[cpg] Hi !👋");
+		if (RecoveryInProgress() != in_recovery)
+		{
+			elog(LOG, "[cpg] I've been promoted! 🌟");
+			update_ps_display();
+			in_recovery = RecoveryInProgress();
+		}
+		else
+			elog(LOG, "[cpg] Hi !👋");
 
 		/* Wait for an event or timeout */
 		WaitLatch(MyLatch,
@@ -158,8 +190,8 @@ _PG_init(void)
 	/* We currently don't need shmem access neither database connection */
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 
-	/* Start the bgworker as soon as the postmaster can */
-	worker.bgw_start_time = BgWorkerStart_PostmasterStart;
+	/* Start the bgworker as soon as a consistant state has been reached */
+	worker.bgw_start_time = BgWorkerStart_ConsistentState;
 
 	/* Set the name of the bgwriter library */
 	snprintf(worker.bgw_library_name, BGW_MAXLEN, "cpg");
